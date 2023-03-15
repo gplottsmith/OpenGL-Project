@@ -1,0 +1,1265 @@
+
+
+
+This File contains Blocks of code that were unused but might be used later, 
+along with a brief dexcription.
+
+
+
+
+
+	//This Function gets the penetration Distance after collision from two objects described by two arrays of
+	//points. Needs more debugging.
+	float secondaryCollision( glm::vec3* points1, int size1, glm::vec3* points2, int size2, BSTDotProduct* root, glm::vec3& dir )
+	{
+		CSOFacet facet;
+		glm::vec3 triCenter;
+		glm::vec3* pointArray = nullptr;
+		int pointArraySize = 0;
+		
+		std::queue< glm::vec3 > points;
+		root->toQueueInOrder( &points, root );
+
+		pointArraySize = points.size( );
+		pointArray = new glm::vec3[ pointArraySize ];
+
+		for( int i = 0; i < pointArraySize; i++ )
+		{
+			pointArray[ i ] = points.front( );
+			points.pop( );
+		}
+
+		for( int i = 2; i < pointArraySize; i++ )
+		{
+			for( int j = 1; j < i; j++ )
+			{
+				for( int k = 0; k < j; k++ )
+				{
+					facet.setData( pointArray[ i ], pointArray[ j ], pointArray[ k ] );
+					triCenter = supportPenetrationDepth( points1, size1, points2, size2, facet.getNormal( ) );
+
+					if( i == 15 && j == 7 && k == 3 )
+						std::cout << "\nHere";
+
+					if( !aboveTri( facet.getNormal( ), pointArray[ i ], triCenter ) )
+					{
+						if( inTri( dir, facet ) )
+						{
+							//If the Tri is on the CSO border and intersects with the line origin -> dir, the distance block1 must travel 
+							//to be out of block2 in -dir is the length of the intersect of the line origin -> dir with the Tri.
+							delete[ ] pointArray;
+							pointArray = nullptr;
+
+							return linePlaneIntersectDistance( dir, facet );
+						}
+					}
+				}
+			}
+
+		}
+
+		delete[ ] pointArray;
+		pointArray = nullptr;
+
+		std::cout << "\nError: secondaryCollision failed to find the correct collision distance.\n";
+
+		return 0.0f;
+	}
+
+	//	Gets the CSO of two objects based only on points that could collide. Needs more debugging.
+	BSTDotProduct* collidablePointsCSO( glm::vec3* points1, int size1, glm::vec3* points2, int size2, const Block& block1, const Block& block2, const glm::vec3& searchDir )
+	{
+		BSTDotProduct tree;
+		BSTDotProduct* root = nullptr;
+
+		for( int i = 0; i < size1; i++ )
+		{
+			for( int j = 0; j < size2; j++ )
+			{
+				if (!i && !j )
+					root = tree.insert( root, points1[ i ] - points2[ j ], searchDir );
+				else
+					tree.insert( root, points1[ i ] - points2[ j ], searchDir );
+			}
+		}
+
+		return root;
+	}
+
+	//Like SupportGJK, but using vec3 arrays instead of whole Blocks. 
+	glm::vec3 supportPenetrationDepth( const glm::vec3* points1, int size1, const glm::vec3* points2, int size2, const glm::vec3& dir ) const
+	{
+		float max = -INFINITY;
+		int index1 = 0;
+		int index2 = 0;
+
+		for( int i = 0; i < size1; i++ )
+		{
+
+			float dot = glm::dot( points1[ i ], dir );
+			if( dot > max )
+			{
+				max = dot;
+				index1 = i;
+			}
+		}
+
+		max = -INFINITY;
+
+		for( int i = 0; i < size2; i++ )
+		{
+			float dot = glm::dot( points2[ i ], -dir );
+			if( dot > max )
+			{
+				max = dot;
+				index2 = i;
+			}
+		}
+
+		return points1[ index1 ] - points2[ index2 ];
+	}
+
+
+	//This gjk function is for collision with a whole other Block; the other Block has to be a convex shape to work correctly. Penetration Depth and SupportGJK
+	//are included below. Could possibly implement system that splits a concave shape into convex shapes and reuse these.
+	//Returns the translation that will push this block out of other block
+	glm::vec3* gjkCollision( Block& other, bool* edgeCase ) const
+	{
+
+		glm::vec3 D( *mMoveDirectionPtr );
+		glm::vec3 S = supportGJK( *this, other, D );
+		CSOFacet closestFacet;
+
+		if( D.x == 0 &&  D.y == 0 && D.z == 0 )
+			return nullptr;
+
+		glm::vec3* value = nullptr;
+		
+		glm::vec3* simplex = new glm::vec3[ 4 ];
+		int simplexIndex( 1 );
+		simplex[ 0 ] = S;
+		D = -S;
+				
+		int count( 0 );
+		while( count < 100 )
+		{
+			S = supportGJK( *this, other, D );
+			if( glm::dot( S, D ) < 0 )
+			{
+				//No Intersection is possible
+				break;
+			}
+			simplex[ simplexIndex++ ] = S;
+			if( doSimplex( &simplex, &simplexIndex, &D ) )
+			{
+				//Origin was found in simplex
+				value = new glm::vec3( );
+
+				if( containsOrigin( simplex, 4 ) )
+				{
+					closestFacet = penetrationDepth( simplex, simplexIndex, *this, other, edgeCase );
+
+					if( closestFacet.getDistanceSquared( ) != 0.0f )
+						*value = ( -glm::normalize( closestFacet.getNormal( ) ) ) * ( sqrt( closestFacet.getDistanceSquared( ) ) + 1.0f );
+					else
+						*value = glm::vec3( );
+				}
+
+				delete[ ] simplex;
+				simplex = nullptr;
+
+				return value;
+			}
+			count++;
+
+		}
+
+		std::cout << "\nGJK took too long to find the origin, assume no overlap.\n";
+		*edgeCase = true;
+
+		delete[ ] simplex;
+		simplex = nullptr;
+
+		return nullptr;
+	}
+
+	CSOFacet penetrationDepth( glm::vec3* simplex, int simplexIndex, const Block& block1, const Block& block2, bool* edgeCase ) const
+	{
+		CSOFacet closestFacet;
+		CSOFacet temp;
+		std::priority_queue< CSOFacet, std::vector< CSOFacet >, CSOQueueCompare > facetQueue;
+
+		glm::vec3 searchDirection( *( block1.getMoveDirectionPtr( ) ) );
+
+		switch( simplexIndex )
+		{
+		case 4:				//Tetrahedron
+
+			temp.setData( simplex[ 0 ], simplex[ 1 ], simplex[ 2 ] );
+			facetQueue.push( temp );
+			temp.setData( simplex[ 1 ], simplex[ 2 ], simplex[ 3 ] );
+			facetQueue.push( temp );
+			temp.setData( simplex[ 0 ], simplex[ 1 ], simplex[ 3 ] );
+			facetQueue.push( temp );
+			temp.setData( simplex[ 0 ], simplex[ 2 ], simplex[ 3 ] );
+			facetQueue.push( temp );
+
+			glm::vec3 closestTri[ 3 ];
+			glm::vec3 normal;
+			glm::vec3 triCenter;
+			glm::vec3 triPoint;
+			glm::vec3 p1, p2;
+			glm::vec3 edgeNormal, edgeSplitter;
+ 			CSOFacet facet;
+
+			//Loop will look for the facet of the Minkowski difference ( CSO ) that's closest to the origin.
+
+			int count( 0 );
+  			while( count < 100 )//TODO 8/2/2021: BUGFIX HERE!
+			{
+				count++;
+
+				facet = facetQueue.top( );
+				facetQueue.pop( );
+
+				if( glm::dot( searchDirection, facet.getNormal( ) ) >= 0.0f )
+				{
+
+					normal = facet.getNormal( );
+					//triCenter = supportPenetrationDepth( points1, size1, points2, size2, normal );
+					triCenter = supportGJK( block1, block2, normal );
+					triPoint = facet.getPoint( 0 );
+
+					//Check if we've found the facet of the Minkowski difference that's closest to the origin.
+					if( !aboveTri( normal, triPoint, triCenter ) )
+					{
+
+						return facet;
+					}
+
+					for( int i = 0; i < 3; i++ )
+						closestTri[ i ] = facet.getPoint( i );
+
+					for( int i = 0; i < 3; i++ )	//Iterate through the Tri's edges to see what new facets should be added
+					{
+						p1 = closestTri[ i ];
+						p2 = closestTri[ ( i + 1 ) % 3 ];
+
+						edgeNormal = glm::cross( triCenter - p1, p2 - p1 );
+						if( glm::dot( edgeNormal, p1 ) < 0.0f )
+							edgeNormal = -edgeNormal;
+						//edgeSplitter = supportPenetrationDepth( points1, size1, points2, size2, edgeNormal );
+						edgeSplitter = supportGJK( block1, block2, edgeNormal );
+
+						if( !aboveTri( edgeNormal, triCenter, edgeSplitter ) )		//EdgeSplitter is either p1, p2, or at the same distance along edgeNormal as them.
+						{															//The Edge is on the boundary of the CSO and doesn't need to be split 
+							temp.setData( p1, p2, triCenter );
+							facetQueue.push( temp );
+						}
+						else
+						{
+							temp.setData( p1, edgeSplitter, triCenter );
+							facetQueue.push( temp );
+							temp.setData( edgeSplitter, p2, triCenter );
+							facetQueue.push( temp );
+							if( aboveTri( normal, p1, edgeSplitter ) )
+							{
+								temp.setData( p1, p2, edgeSplitter );
+								facetQueue.push( temp );
+							}
+						}
+					}
+				}
+			}
+			std::cout << "\nPenetration Depth failed to find the closest CSO Face.";
+		}
+
+		return closestFacet;
+	}
+
+	glm::vec3 supportGJK( const Block& block1, const Block& block2, glm::vec3& dir ) const
+	{
+		float max = -INFINITY;
+		int index1 = 0;
+		int index2 = 0;
+		unsigned int size1 = block1.getVertexCount( );
+		unsigned int size2 = block2.getVertexCount( );
+
+		for( unsigned int i = 0; i < size1; i++ )
+		{
+
+			float dot = glm::dot( block1.getVertexVec3At( i ), dir );
+			if( dot > max )
+			{
+				max = dot;
+				index1 = i;
+			}
+		}
+
+		max = -INFINITY;
+
+		for( unsigned int i = 0; i < size2; i++ )
+		{
+			float dot = glm::dot( block2.getVertexVec3At( i ), -dir );
+			if( dot > max )
+			{
+				max = dot;
+				index2 = i;
+			}
+		}
+
+		return block1.getVertexVec3At( index1 ) - block2.getVertexVec3At( index2 );
+	}
+
+	//A version of penDepth that is too slow to work
+
+	CSOFacet penetrationDepthFaceSlow( const Block& block, const Face& face )
+	{
+		CSOFacet closestFacet, temp;
+		//std::priority_queue< CSOFacet, std::vector< CSOFacet >, CSOQueueCompare > facetQueue;
+		std::vector< glm::vec3 > CSOPoints;
+		glm::vec3 p1, p2, p3, triCenter;
+		closestFacet.setDistance( INFINITY );
+
+		for( int i = 0; i < block.getVertexCount( ); i++ )
+		{
+			for( int j = 0; j < 3; j++ )
+				CSOPoints.push_back( block.getVertexVec3At( i ) - face.getVec3At( j ) );
+		}
+
+		for( unsigned int i = 0; i < CSOPoints.size( ); i++ )
+		{
+			p1 = CSOPoints.at( i );
+			for( unsigned int j = i + 1; j < CSOPoints.size( ); j++ )
+			{
+				p2 = CSOPoints.at( j );
+				for( unsigned int k = j + 1; k < CSOPoints.size( ); k++ )
+				{
+					p3 = CSOPoints.at( k );
+
+					temp.setData( p1, p2, p3 );
+					triCenter = supportGJKFace( block, face, temp.getNormal( ) );
+
+					if( !aboveTri( temp.getNormal( ), p1, triCenter ) )
+					{
+						if( closestFacet.getDistanceSquared( ) > temp.getDistanceSquared( ) )
+							closestFacet = temp;
+					}
+				}
+			}
+		}
+		return closestFacet;
+	}
+
+
+	// Penetration Depth function for a capsule and a Face
+
+// TODO 7/10/2022: Rewrite function
+//TODO: Bugfix PenatrationDepth, fails to find CSO Face. May need to redo algorithm, or maybe support function is wrong. 8/29/2021
+/*
+Block::CSOFacet BlockCapsule::penetrationDepth( glm::vec3* simplex, int simplexIndex, const Block& block, const Block& other, bool* edgeCase, int& csoSearchCount )
+{
+	Block::CSOFacet value = Block::CSOFacet( );
+	float dist;
+	glm::vec3 dir;
+	float distanceSquared = INFINITY, temp;
+	int index;
+	glm::vec3 points[ 6 ];
+	int oldIndex;
+
+	glm::vec3 topNormal, botNormal, aNormal, bNormal, cNormal;
+	glm::vec3 linePoint, lineDir;
+
+	glm::vec3 upper = mTransform.getTranslationVec3( ) + glm::vec3( 0, mCylinderHalfHeight, 0 );
+	glm::vec3 lower = mTransform.getTranslationVec3( ) - glm::vec3( 0, mCylinderHalfHeight, 0 );
+
+	topNormal = other.getNormal( );
+	botNormal = -topNormal;
+
+	
+	if( topNormal.y >= 0.0f )
+	{
+		points[ 0 ] = upper - other.getVec3At( 0 );
+		points[ 1 ] = upper - other.getVec3At( 1 );
+		points[ 2 ] = upper - other.getVec3At( 2 );
+		points[ 3 ] = lower - other.getVec3At( 0 );
+		points[ 4 ] = lower - other.getVec3At( 1 );
+		points[ 5 ] = lower - other.getVec3At( 2 );
+
+		if( topNormal.y == 0 )	//Special case, will return here
+		{
+			glm::vec3 leftDir( glm::cross( topNormal, glm::vec3( 0, 1, 0 ) ) );
+			glm::vec3 rightDir( glm::cross( topNormal, glm::vec3( 0, -1, 0 ) ) );
+
+			int line1 = -1, line2;
+			int left, right;
+			float maxL = -INFINITY, maxR = -INFINITY;
+
+			for( int i = 0; i < 3; i++ )
+			{
+				if( glm::dot( points[ i ], leftDir ) > maxL )
+				{
+					maxL = glm::dot( points[ i ], leftDir );
+					left = i;
+				}
+				if( glm::dot( points[ i ], rightDir ) > maxR )
+				{
+					maxR = glm::dot( points[ i ], rightDir );
+					right = i;
+				}
+			}
+
+			aNormal = glm::cross( topNormal, points[ 0 ] - points[ 2 ] );
+			bNormal = glm::cross( topNormal, points[ 1 ] - points[ 0 ] );
+			cNormal = glm::cross( topNormal, points[ 2 ] - points[ 1 ] );
+
+			if( glm::dot( aNormal, -points[ 0 ] ) > 0.0f && aNormal.y >= 0.0f )
+			{
+				line1 = 0;
+				line2 = 2;
+			}
+			else if( glm::dot( bNormal, -points[ 0 ] ) > 0.0f && bNormal.y >= 0.0f )
+			{
+				line1 = 0;
+				line2 = 1;
+			}
+			else if( glm::dot( cNormal, -points[ 1 ] ) > 0.0f && cNormal.y >= 0.0f )
+			{
+				line1 = 1;
+				line2 = 2;
+			}
+			else if( glm::dot( aNormal, -points[ 3 ] ) > 0.0f && aNormal.y <= 0.0f )
+			{
+				line1 = 3;
+				line2 = 5;
+			}
+			else if( glm::dot( bNormal, -points[ 3 ] ) > 0.0f && bNormal.y <= 0.0f )
+			{
+				line1 = 3;
+				line2 = 4;
+			}
+			else if( glm::dot( cNormal, -points[ 4 ] ) > 0.0f && cNormal.y <= 0.0f )
+			{
+				line1 = 4;
+				line2 = 5;
+			}
+			else if( glm::dot( leftDir, -points[ left ] ) > 0.0f )
+			{
+				line1 = left;
+				line2 = left + 3;
+			}
+			else if( glm::dot( rightDir, -points[ right ] ) > 0.0f )
+			{
+				line1 = right;
+				line2 = right + 3;
+			}
+			
+			if( line1 == -1 )	//Origin is over the flat shape
+			{
+				dir = topNormal * glm::dot( topNormal, -points[ 0 ] );
+			}
+			else
+			{
+				if( points[ line1 ].x == points[ line2 ].x && points[ line1 ].z == points[ line2 ].z && line2 != line1 + 3 )
+				{
+					int topInd, botInd;
+					if( points[ line1 ].y > points[ line2 ].y )
+					{
+						topInd = line1;
+						botInd = ( line2 + 3 ) % 6;
+					}
+					else
+					{
+						topInd = line2;
+						botInd = ( line1 + 3 ) % 6;
+					}
+					line1 = topInd;
+					line2 = botInd;
+				}
+
+				if( glm::dot( points[ line1 ] - points[ line2 ], -points[ line2 ] ) < 0.0f )
+				{
+					dir = -points[ line2 ];
+				}
+				else if( glm::dot( points[ line2 ] - points[ line1 ], -points[ line1 ] ) < 0.0f )
+				{
+					dir = -points[ line1 ];
+				}
+				else
+				{
+					lineDir = glm::normalize( points[ line2 ] - points[ line1 ] );
+					linePoint = points[ line1 ];
+
+					dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+				}
+			}
+
+			dist = mRadius - glm::sqrt( dir.x * dir.x + dir.y * dir.y + dir.z * dir.z );
+			value.setNormal( dir );
+			value.setDistanceSquared( dist * dist );
+
+			return value;
+		}
+	}
+	else
+	{
+		points[ 0 ] = lower - other.getVec3At( 0 );
+		points[ 1 ] = lower - other.getVec3At( 1 );
+		points[ 2 ] = lower - other.getVec3At( 2 );
+		points[ 3 ] = upper - other.getVec3At( 0 );
+		points[ 4 ] = upper - other.getVec3At( 1 );
+		points[ 5 ] = upper - other.getVec3At( 2 );
+	}
+
+	aNormal = glm::cross( points[ 2 ] - points[ 3 ], points[ 0 ] - points[ 3 ] );
+	bNormal = glm::cross( points[ 0 ] - points[ 4 ], points[ 1 ] - points[ 4 ] );
+	cNormal = glm::cross( points[ 1 ] - points[ 5 ], points[ 2 ] - points[ 5 ] );
+
+	//Find the Point the origin is closest to
+	for( int i = 0; i < 6; i++ )
+	{
+		temp = points[ i ].x * points[ i ].x + points[ i ].y * points[ i ].y + points[ i ].z * points[ i ].z;
+		if( temp < distanceSquared )
+		{
+			distanceSquared = temp;
+			index = i;
+		}
+	}
+	if( index < 3 && glm::dot( -points[ index ], topNormal ) < 0.0f )
+	{
+		oldIndex = index;
+		distanceSquared = INFINITY;
+		for( int i = 3; i < 6; i++ )
+		{
+			temp = points[ i ].x * points[ i ].x + points[ i ].y * points[ i ].y + points[ i ].z * points[ i ].z;
+			if( temp < distanceSquared )
+			{
+				distanceSquared = temp;
+				index = i;
+			}
+		}
+		if( glm::dot( -points[ index ], botNormal ) < 0.0f )
+			index = oldIndex;
+	}
+	else if( index > 2 && glm::dot( -points[ index ], botNormal ) < 0.0f )
+	{
+		oldIndex = index;
+		distanceSquared = INFINITY;
+		for( int i = 0; i < 3; i++ )
+		{
+			temp = points[ i ].x * points[ i ].x + points[ i ].y * points[ i ].y + points[ i ].z * points[ i ].z;
+			if( temp < distanceSquared )
+			{
+				distanceSquared = temp;
+				index = i;
+			}
+		}
+		if( glm::dot( -points[ index ], topNormal ) < 0.0f )
+			index = oldIndex;
+	}
+	//Do Plane Tests and Line Tests on area surrounding Point
+	switch( index )
+	{
+	case 0:		
+		glm::vec3 n02a (glm::cross( aNormal, points[ 2 ] - points[ 0 ] ) );
+		glm::vec3 n03a ( glm::cross( aNormal, points[ 0 ] - points[ 3 ] ) );
+		glm::vec3 n01b ( glm::cross( bNormal, points[ 0 ] - points[ 1 ] ) );
+		glm::vec3 n03b ( glm::cross( bNormal, points[ 3 ] - points[ 0 ] ) );
+		glm::vec3 n02Top ( glm::cross( topNormal, points[ 0 ] - points[ 2 ] ) );
+		glm::vec3 n01Top ( glm::cross( topNormal, points[ 1 ] - points[ 0 ] ) );  
+
+		//Check if Over a
+		if( glm::dot( aNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n02a, -points[ index ] ) < 0.0f &&
+			glm::dot( n03a, -points[ index ] ) < 0.0f )
+		{
+			aNormal = glm::normalize( aNormal );
+			dir = glm::dot( aNormal, -points[ index ] ) * aNormal;
+		}
+		//Check if Over b
+		else if( glm::dot( bNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n01b, -points[ index ] ) < 0.0f &&
+			glm::dot( n03b, -points[ index ] ) < 0.0f )
+		{
+			bNormal = glm::normalize( bNormal );
+			dir = glm::dot( bNormal, -points[ index ] ) * bNormal;
+		}
+		//Check if Over Top
+		else if( glm::dot( topNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n02Top, -points[ index ] ) < 0.0f &&
+			glm::dot( n01Top, -points[ index ] ) < 0.0f )
+		{
+			topNormal = glm::normalize( topNormal );
+			dir = glm::dot( topNormal, -points[ index ] ) * topNormal;
+		}
+		//Check if Over Line 0->2
+		else if( glm::dot( n02Top, -points[ index ] ) > 0.0f &&
+			glm::dot( n02a, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 2 ] - points[ 0 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 2 ] - points[ 0 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 0->1
+		else if( glm::dot( n01Top, -points[ index ] ) > 0.0f &&
+			glm::dot( n01b, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 1 ] - points[ 0 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 1 ] - points[ 0 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 0->3
+		else if( glm::dot( n03a, -points[ index ] ) > 0.0f &&
+			glm::dot( n03b, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 3 ] - points[ 0 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 3 ] - points[ 0 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		else    //Over point 0
+		{
+			dir = -points[ index ];
+		}
+		break;
+
+	case 1:
+		glm::vec3 n10b( glm::cross( bNormal, points[ 0 ] - points[ 1 ] ) );
+		glm::vec3 n14b( glm::cross( bNormal, points[ 1 ] - points[ 4 ] ) );
+		glm::vec3 n12c( glm::cross( cNormal, points[ 1 ] - points[ 2 ] ) );
+		glm::vec3 n14c( glm::cross( cNormal, points[ 4 ] - points[ 1 ] ) );
+		glm::vec3 n10Top( glm::cross( topNormal, points[ 1 ] - points[ 0 ] ) );
+		glm::vec3 n12Top( glm::cross( topNormal, points[ 2 ] - points[ 1 ] ) ); 
+
+		//Check if Over b
+		if( glm::dot( bNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n10b, -points[ index ] ) < 0.0f &&
+			glm::dot( n14b, -points[ index ] ) < 0.0f )
+		{
+			bNormal = glm::normalize( bNormal );
+			dir = glm::dot( bNormal, -points[ index ] ) * bNormal;
+		}
+		//Check if Over c
+		else if( glm::dot( cNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n12c, -points[ index ] ) < 0.0f &&
+			glm::dot( n14c, -points[ index ] ) < 0.0f )
+		{
+			cNormal = glm::normalize( cNormal );
+			dir = glm::dot( cNormal, -points[ index ] ) * cNormal;
+		}
+		//Check if Over Top
+		else if( glm::dot( topNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n10Top, -points[ index ] ) < 0.0f &&
+			glm::dot( n12Top, -points[ index ] ) < 0.0f )
+		{
+			topNormal = glm::normalize( topNormal );
+			dir = glm::dot( topNormal, -points[ index ] ) * topNormal;
+		}
+		//Check if Over Line 1->0
+		else if( glm::dot( n10Top, -points[ index ] ) > 0.0f &&
+			glm::dot( n10b, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 0 ] - points[ 1 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 0 ] - points[ 1 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 1->2
+		else if( glm::dot( n12Top, -points[ index ] ) > 0.0f &&
+			glm::dot( n12c, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 2 ] - points[ 1 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 2 ] - points[ 1 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 1->4
+		else if( glm::dot( n14b, -points[ index ] ) > 0.0f &&
+			glm::dot( n14c, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 4 ] - points[ 1 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 4 ] - points[ 1 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		else    //Over point 1
+		{
+			dir = -points[ index ];
+		}
+		break;
+
+	case 2:
+		glm::vec3 n21c( glm::cross( cNormal, points[ 1 ] - points[ 2 ] ) );
+		glm::vec3 n25c( glm::cross( cNormal, points[ 2 ] - points[ 5 ] ) );
+		glm::vec3 n20a( glm::cross( aNormal, points[ 2 ] - points[ 0 ] ) );
+		glm::vec3 n25a( glm::cross( aNormal, points[ 5 ] - points[ 2 ] ) );
+		glm::vec3 n21Top( glm::cross( topNormal, points[ 2 ] - points[ 1 ] ) );
+		glm::vec3 n20Top( glm::cross( topNormal, points[ 0 ] - points[ 2 ] ) ); 
+
+		//Check if Over c
+		if( glm::dot( cNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n21c, -points[ index ] ) < 0.0f &&
+			glm::dot( n25c, -points[ index ] ) < 0.0f )
+		{
+			cNormal = glm::normalize( cNormal );
+			dir = glm::dot( cNormal, -points[ index ] ) * cNormal;
+		}
+		//Check if Over a
+		else if( glm::dot( aNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n20a, -points[ index ] ) < 0.0f &&
+			glm::dot( n25a, -points[ index ] ) < 0.0f )
+		{
+			aNormal = glm::normalize( aNormal );
+			dir = glm::dot( aNormal, -points[ index ] ) * aNormal;
+		}
+		//Check if Over Top
+		else if( glm::dot( topNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n21Top, -points[ index ] ) < 0.0f &&
+			glm::dot( n20Top, -points[ index ] ) < 0.0f )
+		{
+			topNormal = glm::normalize( topNormal );
+			dir = glm::dot( topNormal, -points[ index ] ) * topNormal;
+		}
+		//Check if Over Line 2->1
+		else if( glm::dot( n21c, -points[ index ] ) > 0.0f &&
+			glm::dot( n21Top, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 1 ] - points[ 2 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 1 ] - points[ 2 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 2->0
+		else if( glm::dot( n20Top, -points[ index ] ) > 0.0f &&
+			glm::dot( n20a, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 0 ] - points[ 2 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 0 ] - points[ 2 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 2->5
+		else if( glm::dot( n25a, -points[ index ] ) > 0.0f &&
+			glm::dot( n25c, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 5 ] - points[ 2 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 5 ] - points[ 2 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		else    //Over point 2
+		{
+			dir = -points[ index ];
+		}
+		break;
+	case 3:
+		glm::vec3 n34b( glm::cross( bNormal, points[ 4 ] - points[ 3 ] ) );
+		glm::vec3 n30b( glm::cross( bNormal, points[ 3 ] - points[ 0 ] ) );
+		glm::vec3 n35a( glm::cross( aNormal, points[ 3 ] - points[ 5 ] ) );
+		glm::vec3 n30a( glm::cross( aNormal, points[ 0 ] - points[ 3 ] ) );
+		glm::vec3 n34Bot( glm::cross( botNormal, points[ 3 ] - points[ 4 ] ) );
+		glm::vec3 n35Bot( glm::cross( botNormal, points[ 5 ] - points[ 3 ] ) ); 
+
+		//Check if Over b
+		if( glm::dot( bNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n34b, -points[ index ] ) < 0.0f &&
+			glm::dot( n30b, -points[ index ] ) < 0.0f )
+		{
+			bNormal = glm::normalize( bNormal );
+			dir = glm::dot( bNormal, -points[ index ] ) * bNormal;
+		}
+		//Check if Over a
+		else if( glm::dot( aNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n35a, -points[ index ] ) < 0.0f &&
+			glm::dot( n30a, -points[ index ] ) < 0.0f )
+		{
+			aNormal = glm::normalize( aNormal );
+			dir = glm::dot( aNormal, -points[ index ] ) * aNormal;
+		}
+		//Check if Over Bot
+		else if( glm::dot( botNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n34Bot, -points[ index ] ) < 0.0f &&
+			glm::dot( n35Bot, -points[ index ] ) < 0.0f )
+		{
+			botNormal = glm::normalize( botNormal );
+			dir = glm::dot( botNormal, -points[ index ] ) * botNormal;
+		}
+		//Check if Over Line 3->4
+		else if( glm::dot( n34b, -points[ index ] ) > 0.0f &&
+			glm::dot( n34Bot, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 4 ] - points[ 3 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 4 ] - points[ 3 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 3->5
+		else if( glm::dot( n35Bot, -points[ index ] ) > 0.0f &&
+			glm::dot( n35a, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 5 ] - points[ 3 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 5 ] - points[ 3 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 3->0
+		else if( glm::dot( n30a, -points[ index ] ) > 0.0f &&
+			glm::dot( n30b, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 0 ] - points[ 3 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 0 ] - points[ 3 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		else    //Over point 3
+		{
+			dir = -points[ index ];
+		}
+		break;
+	case 4:
+		glm::vec3 n45c( glm::cross( cNormal, points[ 5 ] - points[ 4 ] ) );
+		glm::vec3 n41c( glm::cross( cNormal, points[ 4 ] - points[ 1 ] ) );
+		glm::vec3 n43b( glm::cross( bNormal, points[ 4 ] - points[ 3 ] ) );
+		glm::vec3 n41b( glm::cross( bNormal, points[ 1 ] - points[ 4 ] ) );
+		glm::vec3 n45Bot( glm::cross( botNormal, points[ 4 ] - points[ 5 ] ) );
+		glm::vec3 n43Bot( glm::cross( botNormal, points[ 3 ] - points[ 4 ] ) );
+
+		//Check if Over c
+		if( glm::dot( cNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n45c, -points[ index ] ) < 0.0f &&
+			glm::dot( n41c, -points[ index ] ) < 0.0f )
+		{
+			cNormal = glm::normalize( cNormal );
+			dir = glm::dot( cNormal, -points[ index ] ) * cNormal;
+		}
+		//Check if Over b
+		else if( glm::dot( bNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n43b, -points[ index ] ) < 0.0f &&
+			glm::dot( n41b, -points[ index ] ) < 0.0f )
+		{
+			bNormal = glm::normalize( bNormal );
+			dir = glm::dot( bNormal, -points[ index ] ) * bNormal;
+		}
+		//Check if Over Bot
+		else if( glm::dot( botNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n45Bot, -points[ index ] ) < 0.0f &&
+			glm::dot( n43Bot, -points[ index ] ) < 0.0f )
+		{
+			botNormal = glm::normalize( botNormal );
+			dir = glm::dot( botNormal, -points[ index ] ) * botNormal;
+		}
+		//Check if Over Line 4->5
+		else if( glm::dot( n45c, -points[ index ] ) > 0.0f &&
+			glm::dot( n45Bot, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 5 ] - points[ 4 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 5 ] - points[ 4 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 4->3
+		else if( glm::dot( n43Bot, -points[ index ] ) > 0.0f &&
+			glm::dot( n43b, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 3 ] - points[ 4 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 3 ] - points[ 4 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 4->1
+		else if( glm::dot( n41c, -points[ index ] ) > 0.0f &&
+			glm::dot( n41b, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 1 ] - points[ 4 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 1 ] - points[ 4 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		else    //Over point 4
+		{
+			dir = -points[ index ];
+		}
+		break;
+	case 5:
+		glm::vec3 n53a( glm::cross( aNormal, points[ 3 ] - points[ 5 ] ) );
+		glm::vec3 n52a( glm::cross( aNormal, points[ 5 ] - points[ 2 ] ) );
+		glm::vec3 n54c( glm::cross( cNormal, points[ 5 ] - points[ 4 ] ) );
+		glm::vec3 n52c( glm::cross( cNormal, points[ 2 ] - points[ 5 ] ) );
+		glm::vec3 n53Bot( glm::cross( botNormal, points[ 5 ] - points[ 3 ] ) );
+		glm::vec3 n54Bot( glm::cross( botNormal, points[ 4 ] - points[ 5 ] ) );
+
+		//Check if Over a
+		if( glm::dot( aNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n53a, -points[ index ] ) < 0.0f &&
+			glm::dot( n52a, -points[ index ] ) < 0.0f )
+		{
+			aNormal = glm::normalize( aNormal );
+			dir = glm::dot( aNormal, -points[ index ] ) * aNormal;
+		}
+		//Check if Over c
+		else if( glm::dot( cNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n54c, -points[ index ] ) < 0.0f &&
+			glm::dot( n52c, -points[ index ] ) < 0.0f )
+		{
+			cNormal = glm::normalize( cNormal );
+			dir = glm::dot( cNormal, -points[ index ] ) * cNormal;
+		}
+		//Check if Over Bot
+		else if( glm::dot( botNormal, -points[ index ] ) > 0.0f &&
+			glm::dot( n53Bot, -points[ index ] ) < 0.0f &&
+			glm::dot( n54Bot, -points[ index ] ) < 0.0f )
+		{
+			botNormal = glm::normalize( botNormal );
+			dir = glm::dot( botNormal, -points[ index ] ) * botNormal;
+		}
+		//Check if Over Line 5->3
+		else if( glm::dot( n53a, -points[ index ] ) > 0.0f &&
+			glm::dot( n53Bot, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 3 ] - points[ 5 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 3 ] - points[ 5 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 5->4
+		else if( glm::dot( n54Bot, -points[ index ] ) > 0.0f &&
+			glm::dot( n54c, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 4 ] - points[ 5 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 4 ] - points[ 5 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		//Check if Over Line 5->2
+		else if( glm::dot( n52a, -points[ index ] ) > 0.0f &&
+			glm::dot( n52c, -points[ index ] ) > 0.0f &&
+			glm::dot( points[ 2 ] - points[ 5 ], -points[ index ] ) > 0.0f )
+		{
+			lineDir = glm::normalize( points[ 2 ] - points[ 5 ] );
+			linePoint = points[ index ];
+
+			dir = -linePoint - glm::dot( -linePoint, lineDir ) * lineDir;
+		}
+		else    //Over point 5
+		{
+			dir = -points[ index ];
+		}
+		break;
+	}
+
+	dist = mRadius - glm::sqrt( dir.x * dir.x + dir.y * dir.y + dir.z * dir.z );
+	value.setNormal( dir );
+	value.setDistanceSquared( dist * dist );
+
+	return value;	
+}*/
+
+
+
+
+//Former Capsule GJK function
+
+glm::vec3* value = new glm::vec3;
+	glm::vec3 top( mTransform.getTranslationVec3( ) + glm::vec3( 0, mCylinderHalfHeight, 0 ) );
+	glm::vec3 bot( mTransform.getTranslationVec3( ) - glm::vec3( 0, mCylinderHalfHeight, 0 ) );
+	glm::vec3 topClosestPoint, botClosestPoint, distance, n;
+	Block::CSOFacet closestFacet;
+	float topDist, botDist;
+
+	sphereBlockCollision( &topClosestPoint, top, other );
+	sphereBlockCollision( &botClosestPoint, bot, other );
+
+	distance = topClosestPoint - top;
+	topDist = distance.x * distance.x + distance.y * distance.y + distance.z * distance.z;
+
+	if( topDist < mRadius * mRadius )
+	{
+		bool defaultVar = false;
+		int i = 0;
+		closestFacet = penetrationDepth( nullptr, 0, *this, other, &defaultVar, i );
+
+		*value = ( -glm::normalize( closestFacet.getNormal( ) ) ) * ( sqrt( closestFacet.getDistanceSquared( ) ) + 1.0f );
+		return value;
+	}
+
+	distance = botClosestPoint - bot;
+	botDist = distance.x * distance.x + distance.y * distance.y + distance.z * distance.z;
+
+	if( botDist < mRadius * mRadius )
+	{
+		bool defaultVar = false;	int i = 0;
+		closestFacet = penetrationDepth( nullptr, 0, *this, other, &defaultVar, i );
+
+		*value = ( -glm::normalize( closestFacet.getNormal( ) ) ) * ( sqrt( closestFacet.getDistanceSquared( ) ) + 1.0f );
+		return value;
+	}
+
+	if( topDist < botDist && top.y > topClosestPoint.y && bot.y < topClosestPoint.y )
+	{
+		n = glm::cross( bot - top, topClosestPoint - top );
+		n = glm::normalize( glm::cross( n, top - bot ) );
+
+		distance = n * glm::dot( n, top - topClosestPoint );
+
+		if( distance.x * distance.x + distance.y * distance.y + distance.z * distance.z < mRadius * mRadius )
+		{
+			bool defaultVar = false;	int i = 0;
+			closestFacet = penetrationDepth( nullptr, 0, *this, other, &defaultVar, i );
+
+			*value = ( -glm::normalize( closestFacet.getNormal( ) ) ) * ( sqrt( closestFacet.getDistanceSquared( ) ) + 1.0f );
+			return value;
+		}
+	}
+	else if( botDist < topDist && bot.y < botClosestPoint.y && top.y > botClosestPoint.y )
+	{
+		n = glm::cross( top - bot, botClosestPoint - bot );
+		n = glm::normalize( glm::cross( n, bot - top ) );
+
+		distance = n * glm::dot( n, bot - botClosestPoint );
+
+		if( distance.x * distance.x + distance.y * distance.y + distance.z * distance.z < mRadius * mRadius )
+		{
+			bool defaultVar = false;	int i = 0;
+			closestFacet = penetrationDepth( nullptr, 0, *this, other, &defaultVar, i );
+
+			*value = ( -glm::normalize( closestFacet.getNormal( ) ) ) * ( sqrt( closestFacet.getDistanceSquared( ) ) + 1.0f );
+			return value;
+		}
+	}
+	
+
+	delete value;
+	value = nullptr;
+
+	return nullptr;
+	return nullptr;
+
+
+
+
+This code was part of BlockCapsule's penetrationDepth function and was used to define a facet in the CSO. Was made obsolete by the Facet class. 1/2/2023
+
+
+/*
+	// To fill a vector with the points in the Inner CSO that we will test projPoint against, first
+	// find the points in CollidablePoints furthest in the direction of planeNormals[ planeIndex ]
+
+	max = glm::dot( planeNormal, collidablePointsIndices[ 0 ] );
+	planePoints.clear( );
+	planePoints.emplace_back( collidablePointsIndices[ 0 ] );
+
+	for( unsigned int i = 1; i < collidablePointsIndices.size( ); i++ )
+	{
+		if( glm::abs( glm::dot( planeNormal, collidablePointsIndices[ i ] ) - max ) < 0.1f )
+		{
+			planePoints.emplace_back( collidablePointsIndices[ i ] );
+		}
+		else if( glm::dot( planeNormal, collidablePointsIndices[ i ] ) > max )
+		{
+			planePoints.clear( );
+			planePoints.emplace_back( collidablePointsIndices[ i ] );
+			max = glm::dot( planeNormal, collidablePointsIndices[ i ] );
+		}
+	}
+
+	// Add vertex Indices defining the boundary of the Plane
+
+	std::vector< glm::vec3 > csoEdges;
+	int p1, p2;
+	const int* faceIndices;
+ 	std::vector< std::pair< int, int > > boundary;
+	std::pair< int, int > boundaryEdge;
+	std::pair< int, int > tempEdge;
+	if( planePoints.size( ) > 2 )
+	{
+		for( int i = 0; i < b.getFaceCount( ); i++ )
+		{
+			if( glm::length( glm::normalize( faces[ i ].getNormal( ) ) - planeNormal ) < 0.1f )
+			{
+				faceIndices = faces[ i ].getIndices( );
+
+				for( int j = 0; j < 3; j++ )
+				{
+					tempEdge.first = faceIndices[ j ];
+					tempEdge.second = faceIndices[ ( j + 1 ) % 3 ];
+
+					bool unique = true;
+					for( unsigned int k = 0; k < boundary.size( ); k++ )
+					{
+						boundaryEdge = boundary[ k ];
+
+						if( boundaryEdge.first != -1 )
+						{
+							p1 = boundaryEdge.first;
+							p2 = boundaryEdge.second;
+
+							if( ( tempEdge.first == p1 && tempEdge.second == p2 ) ||
+								( tempEdge.first == p2 && tempEdge.second == p1 ) )
+							{
+								unique = false;
+								boundary[ k ].first = -1;
+
+								break;
+							}
+						}
+					}
+					if( unique )
+						boundary.emplace_back( tempEdge );
+
+				}
+			}
+		}
+
+		// Having defined the points in b comprising the face we're colliding with,
+		// we now define the face in the CSO it corresponds to
+
+		glm::vec3 selfPoint;
+		glm::vec3 edgeLine;
+
+		if( planeNormal.y != 0 )
+		{
+			if( planeNormal.y > 0 )
+				selfPoint = getBotPoint( );
+
+			else
+				selfPoint = getTopPoint( );
+
+			for( unsigned int i = 0; i < boundary.size( ); i++ )
+			{
+				if( boundary[ i ].first != -1 )
+				{ 
+					csoEdges.emplace_back( vertices[ boundary[ i ].first ].getCoordinateVec3( ) - selfPoint );
+				}
+			}
+		}
+		else
+		{
+			for( unsigned int i = 0; i < boundary.size( ); i++ )
+			{
+				if( boundary[ i ].first != -1 )
+				{
+					edgeLine = vertices[ boundary[ i ].second ].getCoordinateVec3( ) - vertices[ boundary[ i ].first ].getCoordinateVec3( );
+					edgeLine = glm::cross( planeNormal, edgeLine );
+
+					if( edgeLine.y > 0 )
+						csoEdges.emplace_back( vertices[ boundary[ i ].first ].getCoordinateVec3( ) - getBotPoint( ) );
+
+					else if( edgeLine.y < 0 )
+						csoEdges.emplace_back( vertices[ boundary[ i ].first ].getCoordinateVec3( ) - getTopPoint( ) );
+
+					else
+					{
+						if( vertices[ boundary[ i ].first ].getCoordinateVec3( ).y > vertices[ boundary[ i ].second ].getCoordinateVec3( ).y )
+						{
+							csoEdges.emplace_back( vertices[ boundary[ i ].first ].getCoordinateVec3( ) - getBotPoint( ) );
+						}
+						else
+						{
+							csoEdges.emplace_back( vertices[ boundary[ i ].first ].getCoordinateVec3( ) - getTopPoint( ) );
+						}
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		glm::vec3 edgeNormal = glm::cross( planeNormal, planePoints[ 1 ] - planePoints[ 0 ] );
+
+		if( edgeNormal.y > 0 )
+		{
+			csoEdges.emplace_back( planePoints[ 0 ] - getBotPoint( ) );
+			csoEdges.emplace_back( planePoints[ 1 ] - getBotPoint( ) );
+			csoEdges.emplace_back( planePoints[ 1 ] - getTopPoint( ) );
+			csoEdges.emplace_back( planePoints[ 0 ] - getTopPoint( ) );
+		}
+		else
+		{
+			csoEdges.emplace_back( planePoints[ 1 ] - getBotPoint( ) );
+			csoEdges.emplace_back( planePoints[ 0 ] - getBotPoint( ) );
+			csoEdges.emplace_back( planePoints[ 0 ] - getTopPoint( ) );
+			csoEdges.emplace_back( planePoints[ 1 ] - getTopPoint( ) );
+		}
+	}
+	// We now have the points in the csoFace i order and projPoint. All that is left is to 
+	// determine which edge projPoint is closest to, and whether or not it's in the csoFace
+
+	// Look through csoEdges. For every edge, determine whether the line from projPoint to the edge points in the same direction as 
+	// edgeNormal. If any point in different directions, add that index into csoEdges to a vector of ints.
+
+	glm::vec3 edgeNormal;
+	glm::vec3 edgeProj;
+	glm::vec3 tempEdgeProj;
+	float maxDistance = -INFINITY;
+	float tempMax;
+	unsigned int csoEdgeIndex = -1;
+
+	for( unsigned int i = 0; i < csoEdges.size( ); i++ )
+	{
+		edgeNormal = csoEdges[ ( i + 1 ) % csoEdges.size( ) ] - csoEdges[ i ];
+		edgeNormal = glm::cross( planeNormal, edgeNormal );
+
+		if( DIFFERENT_DIRECTION( edgeNormal, csoEdges[ i ] - projPoint ) )
+		{
+			edgeNormal = csoEdges[ ( i + 1 ) % csoEdges.size( ) ] - csoEdges[ i ];
+			tempEdgeProj = ( glm::dot( projPoint - csoEdges[ i ], edgeNormal ) / ( glm::dot( edgeNormal, edgeNormal ) ) ) * edgeNormal;
+			tempEdgeProj += csoEdges[ i ];
+
+			tempMax = glm::dot( tempEdgeProj - projPoint, tempEdgeProj - projPoint );
+			if( tempMax > maxDistance )
+			{
+				maxDistance = tempMax;
+				csoEdgeIndex = i;
+				edgeProj = tempEdgeProj;
+			}
+		}
+	}
+
+	if( csoEdgeIndex == -1 )
+		return ( mRadius + 1.0f - distanceFromPlane ) * planeNormals[ planeIndex ];
+
+	else
+	{
+		if( DIFFERENT_DIRECTION( projPoint - csoEdges[ csoEdgeIndex ], csoEdges[ ( csoEdgeIndex + 1 ) % csoEdges.size( ) ] - csoEdges[ csoEdgeIndex ] ) )
+		{
+			glm::vec3 cornerToOrigin = -csoEdges[ csoEdgeIndex ];
+			float distanceToLeave = mRadius + 1.0f - glm::sqrt( glm::dot( cornerToOrigin, cornerToOrigin ) );
+
+			return glm::normalize( cornerToOrigin ) * distanceToLeave;
+		}
+		else if( DIFFERENT_DIRECTION( projPoint - csoEdges[ ( csoEdgeIndex + 1 ) % csoEdges.size( ) ], csoEdges[ csoEdgeIndex ] - csoEdges[ ( csoEdgeIndex + 1 ) % csoEdges.size( ) ] ) )
+		{
+			glm::vec3 cornerToOrigin = -csoEdges[ ( csoEdgeIndex + 1 ) % csoEdges.size( ) ];
+			float distanceToLeave = mRadius + 1.0f - glm::sqrt( glm::dot( cornerToOrigin, cornerToOrigin ) );
+
+			return glm::normalize( cornerToOrigin ) * distanceToLeave;
+		}
+		else
+		{
+			float distanceFromEdgeProj = glm::sqrt( glm::dot( edgeProj, edgeProj ) );
+
+			return glm::normalize( -edgeProj ) * ( mRadius + 1.0f - distanceFromEdgeProj );
+		}
+	}
+
+	return glm::vec3( );
+	*/
